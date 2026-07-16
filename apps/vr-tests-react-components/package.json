@@ -8,10 +8,12 @@
     "clean": "just-scripts clean",
     "format": "prettier . -w --ignore-path ../../.prettierignore",
     "lint": "just-scripts lint",
+    "plan-vr": "node scripts/vr-test-plan.js",
     "start": "storybook dev",
     "test": "just-scripts test",
     "type-check": "tsc -p . --noEmit --baseUrl .",
-    "test-vr": "storywright  --browsers chromium --url dist/storybook --destpath dist/screenshots --waitTimeScreenshot 500 --concurrency 4 --headless true --bailOnStoriesError --stepsApi parameters"
+    "test-vr": "yarn test-vr-capture",
+    "test-vr-capture": "storywright --browsers chromium --url dist/storybook --destpath dist/screenshots --waitTimeScreenshot 500 --concurrency 4 --headless true --bailOnStoriesError --stepsApi parameters"
   },
   "dependencies": {
     "@fluentui/react-accordion": "*",

@@ -1,6 +1,7 @@
 name: VRT PR
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     branches:
       # Why only master - https://github.com/microsoft/fluentui/pull/34072#discussion_r2011220032
       - master
@@ -20,10 +21,107 @@ permissions:
   actions: 'read'
 
 jobs:
-  generate_vrt_screenshots:
+  plan_and_build_v9:
     if: ${{ github.repository_owner == 'microsoft' }}
     runs-on: macos-14-xlarge
-    name: Generate screenshots
+    name: Plan and build v9 VRT
+    timeout-minutes: 60
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      partition_count: ${{ steps.plan.outputs.partition_count }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Derive appropriate SHAs for base and head for `nx affected` commands
+        uses: nrwl/nx-set-shas@826660b82addbef3abff5fa871492ebad618c9e1 # v4.3.3
+        with:
+          main-branch-name: 'master'
+
+      - uses: actions/setup-node@v6
+        with:
+          cache: 'yarn'
+          node-version: '22'
+
+      - run: yarn install --frozen-lockfile
+
+      - name: Plan affected v9 stories
+        id: plan
+        env:
+          VRT_FORCE_FULL: "${{ contains(github.event.pull_request.labels.*.name, 'VRT: Full') }}"
+        run: |
+          yarn nx run vr-tests-react-components:plan-vr
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const plan = require('./apps/vr-tests-react-components/dist/vr-test-plan.json');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `mode=${plan.mode}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(plan.partitionMatrix)}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `partition_count=${plan.partitionCount}\n`);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## v9 VRT plan\n\n**${plan.mode}**: ${plan.reason}\n\nStory files: ${plan.stories.length}; partitions: ${plan.partitionCount}.\n`);
+          NODE
+
+      - name: Build affected v9 Storybook
+        if: ${{ steps.plan.outputs.mode != 'skip' }}
+        env:
+          VRT_PLAN_PATH: ${{ github.workspace }}/apps/vr-tests-react-components/dist/vr-test-plan.json
+        run: yarn nx run vr-tests-react-components:build-storybook --skip-nx-cache
+
+      - name: Upload v9 Storybook
+        if: ${{ steps.plan.outputs.mode != 'skip' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: v9-vrt-storybook
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            apps/vr-tests-react-components/dist/storybook
+            apps/vr-tests-react-components/dist/vr-test-plan.json
+
+  capture_v9:
+    needs: plan_and_build_v9
+    if: ${{ needs.plan_and_build_v9.outputs.mode != 'skip' }}
+    runs-on: macos-14-xlarge
+    name: Capture v9 VRT (${{ matrix.partition }}/${{ needs.plan_and_build_v9.outputs.partition_count }})
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: ${{ fromJSON(needs.plan_and_build_v9.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          cache: 'yarn'
+          node-version: '22'
+
+      - run: yarn install --frozen-lockfile
+      - run: yarn playwright install --with-deps
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: v9-vrt-storybook
+          path: apps/vr-tests-react-components/dist
+
+      - name: Capture v9 partition
+        run: >-
+          yarn nx run vr-tests-react-components:test-vr-capture --skip-nx-cache --
+          --partitionIndex ${{ matrix.partition }}
+          --totalPartitions ${{ needs.plan_and_build_v9.outputs.partition_count }}
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: v9-vrt-screenshots-${{ matrix.partition }}
+          retention-days: 1
+          if-no-files-found: error
+          path: apps/vr-tests-react-components/dist/screenshots
+
+  capture_non_v9:
+    if: ${{ github.repository_owner == 'microsoft' }}
+    runs-on: macos-14-xlarge
+    name: Capture v8 and web-component VRT
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -43,28 +141,69 @@ jobs:
       - run: yarn install --frozen-lockfile
       - run: yarn playwright install --with-deps
 
-      - name: Run VR tests (generate screenshots)
-        run: yarn nx affected -t test-vr --nxBail
+      - name: Run affected non-v9 VR tests
+        run: yarn nx affected -t test-vr --exclude=vr-tests-react-components --nxBail
 
       - name: Prepare VR screenshots for upload
         uses: actions/github-script@v8
-        id: screenshots_root
+        id: non_v9_screenshots
         with:
           script: |
             const run = require('./.github/scripts/prepare-vr-screenshots-for-upload');
             const config = {
-              projects: ['vr-tests-web-components', 'vr-tests-react-components', 'vr-tests']
+              projects: ['vr-tests-web-components', 'vr-tests']
             };
             const result = await run({github,context,core,config});
             return result;
           result-encoding: string
+
+      - name: Upload non-v9 screenshots
+        uses: actions/upload-artifact@v6
+        with:
+          name: non-v9-vrt-screenshots
+          retention-days: 1
+          path: ${{ steps.non_v9_screenshots.outputs.result }}
+
+  aggregate_screenshots:
+    needs: [plan_and_build_v9, capture_v9, capture_non_v9]
+    if: ${{ always() && needs.plan_and_build_v9.result == 'success' && needs.capture_non_v9.result == 'success' && (needs.capture_v9.result == 'success' || needs.capture_v9.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    name: Aggregate VRT screenshots
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: non-v9-vrt-screenshots
+          path: screenshots
+
+      - uses: actions/download-artifact@v7
+        if: ${{ needs.plan_and_build_v9.outputs.mode != 'skip' }}
+        with:
+          pattern: v9-vrt-screenshots-*
+          path: screenshots/vr-tests-react-components
+          merge-multiple: true
+
+      - name: Update screenshot report
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const root = 'screenshots';
+          const report = {};
+          for (const project of ['vr-tests-web-components', 'vr-tests-react-components', 'vr-tests']) {
+            if (fs.existsSync(path.join(root, project))) {
+              report[project] = { path: project };
+            }
+          }
+          fs.writeFileSync(path.join(root, 'screenshots-report.json'), JSON.stringify(report, null, 2));
+          NODE
 
       - name: Upload VR screenshots
         uses: actions/upload-artifact@v6
         with:
           name: vrscreenshot
           retention-days: 1
-          path: ${{steps.screenshots_root.outputs.result}}
+          if-no-files-found: error
+          path: screenshots
 
       - name: Save PR number
         run: echo ${{ github.event.number }} > pr.txt

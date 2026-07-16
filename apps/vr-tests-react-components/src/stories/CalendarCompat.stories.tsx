@@ -6,11 +6,10 @@ import { Calendar as CalendarBase } from '@fluentui/react-calendar-compat';
 import { ArrowLeftRegular, ArrowRightRegular, DismissCircleRegular } from '@fluentui/react-icons';
 import type { CalendarProps } from '@fluentui/react-calendar-compat';
 import { getStoryVariant, RTL, TestWrapperDecorator } from '../utilities';
+import { calendarDate } from './CalendarCompat/utils';
 
 const Calendar = (props: CalendarProps) => {
-  const today = new Date('3/15/2023');
-
-  return <CalendarBase today={today} {...props} />;
+  return <CalendarBase today={calendarDate} value={calendarDate} {...props} />;
 };
 
 export default {

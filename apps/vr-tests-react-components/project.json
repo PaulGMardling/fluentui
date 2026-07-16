@@ -5,8 +5,15 @@
   "implicitDependencies": [],
   "tags": ["vNext"],
   "targets": {
+    "plan-vr": {
+      "cache": false
+    },
     "build-storybook": {
       "dependsOn": [{ "projects": ["react-storybook-addon"], "target": "build" }]
+    },
+    "test-vr-capture": {
+      "dependsOn": [],
+      "cache": false
     }
   }
 }
